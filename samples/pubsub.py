@@ -7,6 +7,9 @@ import threading
 import time
 from uuid import uuid4
 import json
+import asyncio
+import time
+import RPi.GPIO as GPIO
 
 # This sample uses the Message Broker for AWS IoT to send and receive messages
 # through an MQTT connection. On startup, the device connects to the server,
@@ -31,6 +34,14 @@ cmdUtils.get_args()
 
 received_count = 0
 received_all_event = threading.Event()
+
+GPIO.setmode(GPIO.BCM)
+
+GPIO.setup(14, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(15, GPIO.OUT)
+GPIO.output(15, GPIO.LOW)
+
+queue = asyncio.Queue(maxsize=2)
 
 # Callback when connection is accidentally lost.
 def on_connection_interrupted(connection, error, **kwargs):
@@ -67,7 +78,9 @@ def on_message_received(topic, payload, dup, qos, retain, **kwargs):
     if received_count == cmdUtils.get_command("count"):
         received_all_event.set()
 
-if __name__ == '__main__':
+#
+async def task_aws_iotcore_main_proc():
+
     mqtt_connection = cmdUtils.build_mqtt_connection(on_connection_interrupted, on_connection_resumed)
 
     print("Connecting to {} with client ID '{}'...".format(
@@ -79,39 +92,42 @@ if __name__ == '__main__':
     print("Connected!")
 
     message_count = cmdUtils.get_command("count")
-    message_topic = cmdUtils.get_command(cmdUtils.m_cmd_topic)
-    message_string = cmdUtils.get_command(cmdUtils.m_cmd_message)
+    # message_topic = cmdUtils.get_command(cmdUtils.m_cmd_topic)
+    message_topic = 'chime/message'
+    # message_string = cmdUtils.get_command(cmdUtils.m_cmd_message)
 
     # Subscribe
-    print("Subscribing to topic '{}'...".format(message_topic))
-    subscribe_future, packet_id = mqtt_connection.subscribe(
-        topic=message_topic,
-        qos=mqtt.QoS.AT_LEAST_ONCE,
-        callback=on_message_received)
+    # print("Subscribing to topic '{}'...".format(message_topic))
+    # subscribe_future, packet_id = mqtt_connection.subscribe(
+    #     topic=message_topic,
+    #     qos=mqtt.QoS.AT_LEAST_ONCE,
+    #     callback=on_message_received)
 
-    subscribe_result = subscribe_future.result()
-    print("Subscribed with {}".format(str(subscribe_result['qos'])))
+    # subscribe_result = subscribe_future.result()
+    # print("Subscribed with {}".format(str(subscribe_result['qos'])))
 
     # Publish message to server desired number of times.
     # This step is skipped if message is blank.
     # This step loops forever if count was set to 0.
-    if message_string:
-        if message_count == 0:
-            print ("Sending messages until program killed")
+    while (True):
+        if queue.qsize():
+            print("queue.get()")
+            qdata = await queue.get()
         else:
-            print ("Sending {} message(s)".format(message_count))
-
-        publish_count = 1
-        while (publish_count <= message_count) or (message_count == 0):
-            message = "{} [{}]".format(message_string, publish_count)
-            print("Publishing message to topic '{}': {}".format(message_topic, message))
-            message_json = json.dumps(message)
-            mqtt_connection.publish(
-                topic=message_topic,
-                payload=message_json,
-                qos=mqtt.QoS.AT_LEAST_ONCE)
-            time.sleep(1)
-            publish_count += 1
+            await asyncio.sleep(0)
+            continue
+        # message = "{} [{}]".format(message_string, publish_count)
+        message = {'chime': 'ON'}
+        message['chime'] = qdata
+        print("Publishing message to topic '{}': {}".format(message_topic, message))
+        message_json = json.dumps(message)
+        print(message_json)
+        mqtt_connection.publish(
+            topic=message_topic,
+            payload=message_json,
+            qos=mqtt.QoS.AT_LEAST_ONCE)
+        #time.sleep(1)
+        #await asyncio.sleep(1)
 
     # Wait for all messages to be received.
     # This waits forever if count was set to 0.
@@ -126,3 +142,38 @@ if __name__ == '__main__':
     disconnect_future = mqtt_connection.disconnect()
     disconnect_future.result()
     print("Disconnected!")
+
+async def task_io_main_proc():
+    print("task_main Started")
+    preStatus = 2
+
+    try:
+        while(True):
+            pinstate = GPIO.input(14)
+
+            if pinstate == 1: # Chime ON
+                if preStatus != 1:
+                    print("Chime ON")
+                    await queue.put('ON');
+                    preStatus = 1
+                    GPIO.output(15, GPIO.HIGH)
+            else: # Chime OFF
+                if preStatus != 0:
+                    preStatus = 0
+                    print("Chime OFF")
+                    await queue.put('OFF');
+                    GPIO.output(15, GPIO.LOW)
+            await asyncio.sleep(0)
+    finally:
+        GPIO.output(15, GPIO.LOW)
+
+async def create_task():
+    task1 = asyncio.create_task(task_io_main_proc())
+    task2 = asyncio.create_task(task_aws_iotcore_main_proc())
+    await task1
+    await task2
+
+if __name__ == '__main__':
+
+    asyncio.run(create_task())
+
