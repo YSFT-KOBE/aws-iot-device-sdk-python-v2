@@ -12,6 +12,7 @@ import time
 import RPi.GPIO as GPIO
 import cv2
 import threading
+import boto3
 
 # This sample uses the Message Broker for AWS IoT to send and receive messages
 # through an MQTT connection. On startup, the device connects to the server,
@@ -45,9 +46,14 @@ GPIO.setup(15, GPIO.OUT)
 GPIO.output(15, GPIO.LOW)
 
 queue = asyncio.Queue(maxsize=2)
-queue_message_chime = "chime_{}"
+queue_message_chime = {"chime": ""}
+queue_message_image = {"image": ""}
 
 threadEvent = threading.Event()
+
+s3 =boto3.resource('s3')
+bucket_name = "ohenro-iot-bucket-2022"
+
 
 # Callback when connection is accidentally lost.
 def on_connection_interrupted(connection, error, **kwargs):
@@ -75,10 +81,6 @@ def on_resubscribe_complete(resubscribe_future):
             if qos is None:
                 sys.exit("Server rejected resubscribe to topic: {}".format(topic))
 
-
-async def queue_image_task_put(str):
-    await queue_image_task.put(str)
-
 # Callback when the subscribed topic receives a message
 def on_message_received(topic, payload, dup, qos, retain, **kwargs):
     print("Received message from topic '{}': {}".format(topic, payload))
@@ -88,11 +90,10 @@ def on_message_received(topic, payload, dup, qos, retain, **kwargs):
 
 #
 async def task_aws_iotcore_main_proc():
-
     mqtt_connection = cmdUtils.build_mqtt_connection(on_connection_interrupted, on_connection_resumed)
-
     print("Connecting to {} with client ID '{}'...".format(
         cmdUtils.get_command(cmdUtils.m_cmd_endpoint), cmdUtils.get_command("client_id")))
+
     connect_future = mqtt_connection.connect()
 
     # Future.result() waits until a result is available
@@ -121,10 +122,9 @@ async def task_aws_iotcore_main_proc():
         else:
             await asyncio.sleep(0)
             continue
-        q_message = qdata.split('_')
-        if q_message[0] == 'chime' :
-            message = {'chime': 'ON'}
-            message['chime'] = q_message[1]
+        qdatajson = json.loads(qdata)
+        if 'chime' in qdatajson:
+            message = qdatajson
             print("Publishing message to topic '{}': {}".format(chime_message_topic, message))
             message_json = json.dumps(message)
             print(message_json)
@@ -132,8 +132,15 @@ async def task_aws_iotcore_main_proc():
                 topic=chime_message_topic,
                 payload=message_json,
                 qos=mqtt.QoS.AT_LEAST_ONCE)
-        elif q_message[0] == 'image' :
-            await queue_image_task.put('create')
+        elif 'image' in qdatajson:
+            message = {'image_url': ''}
+            message['image_url'] = qdatajson['image']
+            print("Publishing message to topic '{}': {}".format(image_release_topic, message))
+            message_json = json.dumps(message)
+            mqtt_connection.publish(
+                topic=image_release_topic,
+                payload=message_json,
+                qos=mqtt.QoS.AT_LEAST_ONCE)
             
         #time.sleep(1)
         #await asyncio.sleep(1)
@@ -154,15 +161,19 @@ async def task_io_main_proc():
 
             if pinstate == 1: # Chime ON
                 if preStatus != 1:
-                    print("Chime ON")
-                    await queue.put(queue_message_chime.format('ON'));
                     preStatus = 1
+                    print("Chime ON")
+                    queue_message_chime['chime'] = 'ON'
+                    qdata = json.dumps(queue_message_chime)
+                    await queue.put(qdata);
                     GPIO.output(15, GPIO.HIGH)
             else: # Chime OFF
                 if preStatus != 0:
                     preStatus = 0
                     print("Chime OFF")
-                    await queue.put(queue_message_chime.format('OFF'));
+                    queue_message_chime['chime'] = 'OFF'
+                    qdata = json.dumps(queue_message_chime)
+                    await queue.put(qdata);
                     GPIO.output(15, GPIO.LOW)
             await asyncio.sleep(0)
     finally:
@@ -182,12 +193,20 @@ async def task_image_create_proc():
                 print("Image Create Req Received!")
                 cap = cv2.VideoCapture(f"rtsp://{user_id}:{user_pw}@{host}/live")
                 ret, frame = cap.read()
+                filename = ""
                 if ret == True:
+                    filename = "image.jpg"
+                    print(filename)
                     # cv2.imshow('VIDEO', frame)
-                    cv2.imwrite('./test.jpg', frame)
+                    cv2.imwrite('./'+filename, frame)
                 cv2.waitKey(1)
                 cap.release()
                 cv2.destroyAllWindows()
+                s3.Bucket(bucket_name).upload_file('./'+filename, filename)
+                print("Image Uploaded!")
+                queue_message_image['image'] = "s3://"+bucket_name+"/"+filename
+                qdata = json.dumps(queue_message_image)
+                await queue.put(qdata);
             else:
                 await asyncio.sleep(0)
     except Exception as e:
