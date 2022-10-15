@@ -47,7 +47,7 @@ GPIO.output(15, GPIO.LOW)
 
 queue = asyncio.Queue(maxsize=2)
 queue_message_chime = {"chime": ""}
-queue_message_image = {"image": ""}
+queue_message_image = {"image": {"bucket": "", "key": ""}}
 
 threadEvent = threading.Event()
 
@@ -133,8 +133,9 @@ async def task_aws_iotcore_main_proc():
                 payload=message_json,
                 qos=mqtt.QoS.AT_LEAST_ONCE)
         elif 'image' in qdatajson:
-            message = {'image_url': ''}
-            message['image_url'] = qdatajson['image']
+            message = {'bucket': '', 'key': ''}
+            message['bucket'] = qdatajson['image']['bucket']
+            message['key'] = qdatajson['image']['key']
             print("Publishing message to topic '{}': {}".format(image_release_topic, message))
             message_json = json.dumps(message)
             mqtt_connection.publish(
@@ -204,7 +205,8 @@ async def task_image_create_proc():
                 cv2.destroyAllWindows()
                 s3.Bucket(bucket_name).upload_file('./'+filename, filename)
                 print("Image Uploaded!")
-                queue_message_image['image'] = "s3://"+bucket_name+"/"+filename
+                queue_message_image['image']['bucket'] = bucket_name
+                queue_message_image['image']['key'] = filename
                 qdata = json.dumps(queue_message_image)
                 await queue.put(qdata);
             else:
